@@ -17,11 +17,10 @@
 # you should also run registry garbage collection, either afterwards (might break your productive env) or at night (cronjob, better)
 # gitlab-ctl registry-garbage-collect
 
-import asyncio
-from japronto import Application
-import delete_docker_registry_image
-import logging
 import os
+import logging
+import aiohttp
+from japronto import Application
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -32,14 +31,23 @@ logger.setLevel(logging.INFO)
 # get one:
 # < /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c"${1:-32}";echo;
 token = os.getenv('CLEAN_TOKEN')
+registry = os.getenv('REGISTRY_URL')
+jwt_url = os.getenv('JWT_URL', None)
+basic_auth = aiohttp.BasicAuth(login=os.getenv('REGISTRY_LOGIN'), password=os.getenv('REGISTRY_PASSWORD'))
 
 if 'DRY_RUN' in os.environ:
     dry_run = True
 else:
     dry_run = False
 
-REGISTRY_DATA_DIR = os.getenv('REGISTRY_DATA_DIR',
-                                  "/var/opt/gitlab/gitlab-rails/shared/registry/docker/registry/v2")
+
+async def api(url, params=None, headers=None, auth=None):
+    logger.info(url)
+    print(url)
+    async with aiohttp.ClientSession(headers=headers, auth=auth) as session:
+        async with session.get(url, params=params) as response:
+            return await response.json()
+
 
 async def batch_remove(request):
     if 'clean-token' in request.query and request.query['clean-token'] == token:
@@ -47,22 +55,23 @@ async def batch_remove(request):
         project_name = request.match_dict['project_name']
         tag = request.match_dict['tag']
         logger.info(f"Valid request, processing {', '.join(request.match_dict.values())}")
-        cleanup(project_namespace, project_name, tag)
+        await cleanup(project_namespace, project_name, tag)
         return request.Response(text='ok')
 
     return request.Response(text='request not valid')
+
 
 async def single_remove(request):
     if 'clean-token' in request.query and 'path' in request.query and request.query['clean-token'] == token:
         logger.info(f"Valid request, processing {request.query['path']}")
         image, tag = request.query['path'].split(':')
-        remove(image, tag)
+        await remove(image, tag)
         return request.Response(text='ok')
 
     return request.Response(text='request not valid')
 
 
-def cleanup(project_namespace, project_name, tag):
+async def cleanup(project_namespace, project_name, tag):
     logger.info("Merge detected")
     this_repo_image = "%s/%s" % (project_namespace, project_name)
     # find all images
@@ -75,26 +84,18 @@ def cleanup(project_namespace, project_name, tag):
         print(e)
     # remove all images with this tag
     for image in images:
-        remove(image, tag)
+        await remove(image, tag)
 
-def remove(image, tag):
-    untagged = False
-    prune = True
-    logger.info("Trying to delete %s:%s" % (image, tag))
-    try:
-        cleaner = delete_docker_registry_image.RegistryCleaner(REGISTRY_DATA_DIR, dry_run)
-        if untagged:
-            cleaner.delete_untagged(image)
-        else:
-            if tag:
-                cleaner.delete_repository_tag(image, tag)
-            else:
-                cleaner.delete_entire_repository(image)
 
-        if prune:
-            cleaner.prune()
-    except delete_docker_registry_image.RegistryCleanerError as error:
-        logger.fatal(error)
+async def remove(image, tag):
+    go_to = f"{registry}/v2/{image}/manifests/{tag}"
+    headers = {'Accept': 'application/vnd.docker.distribution.manifest.v2+json'}
+    if jwt_url:
+        jwt = await api(jwt_url, auth=basic_auth)
+        headers.update({"Authorization": f"Bearer {jwt['token']}"})
+        print(headers)
+    data = await api(go_to, headers=headers)
+    print(data)
 
 
 app = Application()
