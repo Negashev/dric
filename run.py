@@ -85,6 +85,11 @@ async def connect_scheduler():
     scheduler.start()
 
 
+async def index(request):
+    global CATALOG
+    return request.Response(json=CATALOG)
+
+
 app = Application()
 app.extend_request(lambda x: REGISTRY, name='registry', property=True)
 app.loop.run_until_complete(get_catalog(first_load=True))
@@ -92,4 +97,5 @@ app.loop.run_until_complete(connect_scheduler())
 router = app.router
 router.add_route('/{project_namespace}/{project_name}/{tag}', batch_remove)
 router.add_route('/extra_path', single_remove)
+router.add_route('/', index)
 app.run(host='0.0.0.0', port=80, debug=True)
