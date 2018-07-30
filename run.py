@@ -19,8 +19,8 @@
 
 import os
 import logging
-import aiohttp
 from japronto import Application
+from rgc.registry.api import RegistryApi
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -31,22 +31,12 @@ logger.setLevel(logging.INFO)
 # get one:
 # < /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c"${1:-32}";echo;
 token = os.getenv('CLEAN_TOKEN')
-registry = os.getenv('REGISTRY_URL')
-jwt_url = os.getenv('JWT_URL', None)
-basic_auth = aiohttp.BasicAuth(login=os.getenv('REGISTRY_LOGIN'), password=os.getenv('REGISTRY_PASSWORD'))
+registry_url = os.getenv('REGISTRY_URL')
 
 if 'DRY_RUN' in os.environ:
     dry_run = True
 else:
     dry_run = False
-
-
-async def api(url, params=None, headers=None, auth=None):
-    logger.info(url)
-    print(url)
-    async with aiohttp.ClientSession(headers=headers, auth=auth) as session:
-        async with session.get(url, params=params) as response:
-            return await response.json()
 
 
 async def batch_remove(request):
@@ -55,7 +45,7 @@ async def batch_remove(request):
         project_name = request.match_dict['project_name']
         tag = request.match_dict['tag']
         logger.info(f"Valid request, processing {', '.join(request.match_dict.values())}")
-        await cleanup(project_namespace, project_name, tag)
+        await cleanup(request.registry, project_namespace, project_name, tag)
         return request.Response(text='ok')
 
     return request.Response(text='request not valid')
@@ -65,13 +55,13 @@ async def single_remove(request):
     if 'clean-token' in request.query and 'path' in request.query and request.query['clean-token'] == token:
         logger.info(f"Valid request, processing {request.query['path']}")
         image, tag = request.query['path'].split(':')
-        await remove(image, tag)
+        await remove(request.registry, image, tag)
         return request.Response(text='ok')
 
     return request.Response(text='request not valid')
 
 
-async def cleanup(project_namespace, project_name, tag):
+async def cleanup(registry, project_namespace, project_name, tag):
     logger.info("Merge detected")
     this_repo_image = "%s/%s" % (project_namespace, project_name)
     # find all images
@@ -84,21 +74,19 @@ async def cleanup(project_namespace, project_name, tag):
         print(e)
     # remove all images with this tag
     for image in images:
-        await remove(image, tag)
+        await remove(registry, image, tag)
 
 
-async def remove(image, tag):
-    go_to = f"{registry}/v2/{image}/manifests/{tag}"
-    headers = {'Accept': 'application/vnd.docker.distribution.manifest.v2+json'}
-    if jwt_url:
-        jwt = await api(jwt_url, auth=basic_auth)
-        headers.update({"Authorization": f"Bearer {jwt['token']}"})
-        print(headers)
-    data = await api(go_to, headers=headers)
-    print(data)
+async def remove(registry, image, tag):
+    digest = registry.query(f"{registry_url}/v2/{image}/manifests/{tag}", 'head')['Docker-Content-Digest']
+    return registry.query(f"{registry_url}/v2/{image}/manifests/{digest}", 'delete')
 
 
 app = Application()
+app.extend_request(lambda x: RegistryApi(
+    user=os.getenv('REGISTRY_LOGIN'),
+    token=os.getenv('REGISTRY_TOKEN')
+), name='registry', property=True)
 router = app.router
 router.add_route('/{project_namespace}/{project_name}/{tag}', batch_remove)
 router.add_route('/extra_path', single_remove)
