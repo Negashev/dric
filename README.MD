@@ -1,6 +1,6 @@
-# gric
+# dric
 
-Gitlab registry image cleaner
+Docker registry image cleaner
 
 Recursive remove images by tag
 
@@ -25,7 +25,7 @@ negash/dric python3 \
 - remove tag recursive
 
     curl `/group/my-mono-repo/feature-123?clean-token=TOKEN`
-    0000000000
+
     remove all images with tag `feature-123`
     
 - remove unique image
