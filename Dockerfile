@@ -9,6 +9,7 @@ EXPOSE 80
 RUN apk add --update python3
 RUN apk add --no-cache --virtual .build-deps build-base python3-dev py3-pip \
     && pip3 --no-cache install \
+    apscheduler \
     https://github.com/squeaky-pl/japronto/archive/master.zip \
     https://github.com/mvisonneau/docker-registry-gitlab-cleanup/archive/master.zip \
 	&& apk del .build-deps \

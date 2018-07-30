@@ -1,25 +1,7 @@
-#!/usr/bin/python3
-
-#
-# Disclaimer: Dirty workaround, i'm not responsible for anything, although it works for us
-#
-# simple webhook script for https://gitlab.com/gitlab-org/gitlab-ce/issues/21608#note_22185264
-# uses https://github.com/burnettk/delete-docker-registry-image
-#
-# listens on POST requests containing JSON data from Gitlab webhook (on merge)
-# it uses bottlepy, so setup like:
-#   pip install bottle
-# you can run it like
-#   nohup /opt/registry-cleanup/python/registry-cleaner.py >> /var/log/registry-cleanup.log 2>&1 &
-# also you need to put delete-docker-registry-image into the same directory:
-#   curl -O https://raw.githubusercontent.com/burnettk/delete-docker-registry-image/master/delete_docker_registry_image.py
-#
-# you should also run registry garbage collection, either afterwards (might break your productive env) or at night (cronjob, better)
-# gitlab-ctl registry-garbage-collect
-
 import os
 import logging
 from japronto import Application
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from rgc.registry.api import RegistryApi
 
 logger = logging.getLogger(__name__)
@@ -33,6 +15,11 @@ logger.setLevel(logging.INFO)
 token = os.getenv('CLEAN_TOKEN')
 registry_url = os.getenv('REGISTRY_URL')
 
+CATALOG = []
+REGISTRY = RegistryApi(
+    user=os.getenv('REGISTRY_LOGIN'),
+    token=os.getenv('REGISTRY_TOKEN')
+)
 if 'DRY_RUN' in os.environ:
     dry_run = True
 else:
@@ -63,30 +50,45 @@ async def single_remove(request):
 
 async def cleanup(registry, project_namespace, project_name, tag):
     logger.info("Merge detected")
+    global CATALOG
     this_repo_image = "%s/%s" % (project_namespace, project_name)
     # find all images
-    images = [this_repo_image]
-    try:
-        for i in os.listdir(f"{REGISTRY_DATA_DIR}/repositories/{this_repo_image}"):
-            if i not in ['_layers', '_manifests', '_uploads']:
-                images.append(f"{this_repo_image}/{i}")
-    except Exception as e:
-        print(e)
-    # remove all images with this tag
-    for image in images:
-        await remove(registry, image, tag)
+    this_catalog = CATALOG
+    for i in this_catalog:
+        if i.startswith(this_repo_image):
+            await remove(registry, i, tag)
 
 
 async def remove(registry, image, tag):
-    digest = registry.query(f"{registry_url}/v2/{image}/manifests/{tag}", 'head')['Docker-Content-Digest']
-    return registry.query(f"{registry_url}/v2/{image}/manifests/{digest}", 'delete')
+    try:
+        print(f"Try remove {registry_url}/{image}:{tag}")
+        digest = registry.query(f"{registry_url}/v2/{image}/manifests/{tag}", 'head')['Docker-Content-Digest']
+        return registry.query(f"{registry_url}/v2/{image}/manifests/{digest}", 'delete')
+    except Exception as e:
+        print(f"Error remove {registry_url}/{image}:{tag} :{e}")
+
+
+async def get_catalog(first_load=False):
+    if first_load:
+        print(f"First load {registry_url}/v2/_catalog, please wait...")
+    global CATALOG
+    global REGISTRY
+    this_catalog = REGISTRY.query(f"{registry_url}/v2/_catalog", 'get')['repositories']
+    if len(this_catalog) != len(CATALOG):
+        print(f"Found {len(this_catalog)} repositories")
+    CATALOG = this_catalog
+
+
+async def connect_scheduler():
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(get_catalog, 'interval', seconds=int(os.getenv('DRIC_SECONDS_CATALOG', 300)), max_instances=1)
+    scheduler.start()
 
 
 app = Application()
-app.extend_request(lambda x: RegistryApi(
-    user=os.getenv('REGISTRY_LOGIN'),
-    token=os.getenv('REGISTRY_TOKEN')
-), name='registry', property=True)
+app.extend_request(lambda x: REGISTRY, name='registry', property=True)
+app.loop.run_until_complete(get_catalog(first_load=True))
+app.loop.run_until_complete(connect_scheduler())
 router = app.router
 router.add_route('/{project_namespace}/{project_name}/{tag}', batch_remove)
 router.add_route('/extra_path', single_remove)
